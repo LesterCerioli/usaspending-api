@@ -3,8 +3,8 @@ from dataclasses import dataclass
 from functools import reduce
 from typing import Any
 
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql import functions as sf, Column
+from pyspark.sql import Column, DataFrame, SparkSession
+from pyspark.sql import functions as sf
 
 from usaspending_api.download.management.commands.delta_downloads.filters import AccountDownloadFilter
 from usaspending_api.download.v2.download_column_historical_lookups import query_paths
@@ -12,12 +12,12 @@ from usaspending_api.submissions.helpers import get_submission_ids_for_periods
 
 
 class AbstractAccountDownloadDataFrameBuilder(ABC):
-
     def __init__(
         self,
         spark: SparkSession,
         account_download_filter: AccountDownloadFilter,
         award_financial_table: str = "rpt.account_download",
+        object_class_program_activity_download_table: str = "rpt.object_class_program_activity_download",
     ):
         # Resolve Filters
         self.reporting_fiscal_year = account_download_filter.fy
@@ -32,6 +32,7 @@ class AbstractAccountDownloadDataFrameBuilder(ABC):
 
         # Base Dataframes
         self._award_financial_df: DataFrame = spark.table(award_financial_table)
+        self._object_class_program_activity_df: DataFrame = spark.table(object_class_program_activity_download_table)
         self.aab = spark.table("global_temp.appropriation_account_balances")
         self.sa = spark.table("global_temp.submission_attributes")
         self.taa = spark.table("global_temp.treasury_appropriation_account")
@@ -42,7 +43,6 @@ class AbstractAccountDownloadDataFrameBuilder(ABC):
 
     @property
     def dynamic_filters(self) -> Column:
-
         @dataclass
         class Condition:
             name: str
@@ -166,7 +166,6 @@ class AbstractAccountDownloadDataFrameBuilder(ABC):
 
 
 class FederalAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBuilder):
-
     @property
     def award_financial_agg_cols(self) -> dict[str, Column]:
         return {
@@ -384,8 +383,86 @@ class FederalAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBui
         )
 
     @property
+    def object_class_program_activity_groupby_cols(self) -> list[str]:
+        return [
+            "owning_agency_name",
+            "agency_identifier_name",
+            "federal_account_symbol",
+            "federal_account_name",
+            "program_activity_code",
+            "program_activity_name",
+            "object_class_code",
+            "object_class_name",
+            "direct_or_reimbursable_funding_source",
+            "disaster_emergency_fund_code",
+            "disaster_emergency_fund_name",
+            "submission_period",
+        ]
+
+    @property
+    def object_class_program_activity_agg_cols(self) -> dict[str, Column]:
+        return {
+            "reporting_agency_name": self.collect_concat,
+            "budget_function_title": lambda col: self.collect_concat(col_name=col, alias="budget_function"),
+            "budget_subfunction_title": lambda col: self.collect_concat(col_name=col, alias="budget_subfunction"),
+            "obligations_incurred": lambda col: sf.sum(col).alias(col),
+            "obligations_undelivered_orders_unpaid_total": lambda col: sf.sum(col).alias(col),
+            "obligations_undelivered_orders_unpaid_total_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL480100_undelivered_orders_obligations_unpaid": lambda col: sf.sum(col).alias(col),
+            "USSGL480100_undelivered_orders_obligations_unpaid_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL488100_upward_adj_prior_year_undeliv_orders_oblig_unpaid": lambda col: sf.sum(col).alias(col),
+            "obligations_delivered_orders_unpaid_total": lambda col: sf.sum(col).alias(col),
+            "obligations_delivered_orders_unpaid_total_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL490100_delivered_orders_obligations_unpaid": lambda col: sf.sum(col).alias(col),
+            "USSGL490100_delivered_orders_obligations_unpaid_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL498100_upward_adj_of_prior_year_deliv_orders_oblig_unpaid": lambda col: sf.sum(col).alias(col),
+            "gross_outlay_amount_FYB_to_period_end": self.filter_and_sum,
+            "gross_outlay_amount_FYB": lambda col: sf.sum(col).alias(col),
+            "gross_outlays_undelivered_orders_prepaid_total": lambda col: sf.sum(col).alias(col),
+            "gross_outlays_undelivered_orders_prepaid_total_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL480200_undelivered_orders_obligations_prepaid_advanced": lambda col: sf.sum(col).alias(col),
+            "USSGL480200_undelivered_orders_obligations_prepaid_advanced_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL488200_upward_adj_prior_year_undeliv_orders_oblig_prepaid": lambda col: sf.sum(col).alias(col),
+            "gross_outlays_delivered_orders_paid_total": lambda col: sf.sum(col).alias(col),
+            "gross_outlays_delivered_orders_paid_total_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL490200_delivered_orders_obligations_paid": lambda col: sf.sum(col).alias(col),
+            "USSGL490800_authority_outlayed_not_yet_disbursed": lambda col: sf.sum(col).alias(col),
+            "USSGL490800_authority_outlayed_not_yet_disbursed_FYB": lambda col: sf.sum(col).alias(col),
+            "USSGL498200_upward_adj_of_prior_year_deliv_orders_oblig_paid": lambda col: sf.sum(col).alias(col),
+            "deobligations_or_recoveries_or_refunds_from_prior_year": lambda col: sf.sum(col).alias(col),
+            "USSGL487100_downward_adj_prior_year_unpaid_undeliv_orders_oblig": lambda col: sf.sum(col).alias(col),
+            "USSGL497100_downward_adj_prior_year_unpaid_deliv_orders_oblig": lambda col: sf.sum(col).alias(col),
+            "USSGL487200_downward_adj_prior_year_prepaid_undeliv_order_oblig": self.filter_and_sum,
+            "USSGL497200_downward_adj_of_prior_year_paid_deliv_orders_oblig": self.filter_and_sum,
+            "USSGL483100_undelivered_orders_obligations_transferred_unpaid": lambda col: sf.sum(col).alias(col),
+            "USSGL493100_delivered_orders_obligations_transferred_unpaid": lambda col: sf.sum(col).alias(col),
+            "USSGL483200_undeliv_orders_oblig_transferred_prepaid_advanced": lambda col: sf.sum(col).alias(col),
+            "last_modified_date": lambda col: sf.max(col).alias(col),
+        }
+
+    @property
+    def object_class_program_activity_select_cols(self) -> list[Any]:
+        return [
+            col
+            for col in query_paths["object_class_program_activity"]["federal_account"].keys()
+            if not col.startswith("last_modified_date")
+        ] + ["last_modified_date"]
+
+    @property
     def object_class_program_activity(self) -> DataFrame:
-        raise NotImplementedError
+        return (
+            self._object_class_program_activity_df.filter(self.dynamic_filters)
+            .filter(
+                sf.col("submission_id").isin(
+                    get_submission_ids_for_periods(
+                        self.reporting_fiscal_year, self.reporting_fiscal_quarter, self.reporting_fiscal_period
+                    )
+                )
+            )
+            .groupBy(self.object_class_program_activity_groupby_cols)
+            .agg(*[agg_func(col) for col, agg_func in self.object_class_program_activity_agg_cols.items()])
+            .select(self.object_class_program_activity_select_cols)
+        )
 
     @property
     def award_financial(self) -> DataFrame:
@@ -401,7 +478,6 @@ class FederalAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBui
 
 
 class TreasuryAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBuilder):
-
     @property
     def account_balances_groupby_cols(self) -> list[Column]:
         return [
@@ -510,10 +586,6 @@ class TreasuryAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBu
         )
 
     @property
-    def object_class_program_activity(self) -> DataFrame:
-        raise NotImplementedError
-
-    @property
     def award_financial(self) -> DataFrame:
         select_cols = (
             [sf.col("treasury_owning_agency_name").alias("owning_agency_name")]
@@ -525,3 +597,90 @@ class TreasuryAccountDownloadDataFrameBuilder(AbstractAccountDownloadDataFrameBu
             + ["last_modified_date"]
         )
         return self._award_financial_df.filter(self.dynamic_filters & self.non_zero_filters).select(select_cols)
+
+    @property
+    def object_class_program_activity_groupby_cols(self) -> list[str]:
+        return [
+            "data_source",
+            "financial_accounts_by_program_activity_object_class_id",
+            "program_activity_id",
+            "object_class_id",
+            "prior_year_adjustment",
+            "disaster_emergency_fund_code",
+            "USSGL480100_undelivered_orders_obligations_unpaid_FYB",
+            "USSGL480100_undelivered_orders_obligations_unpaid",
+            "USSGL480110_rein_undel_ord_CPE",
+            "USSGL483100_undelivered_orders_obligations_transferred_unpaid",
+            "USSGL488100_upward_adj_prior_year_undeliv_orders_oblig_unpaid",
+            "USSGL490100_delivered_orders_obligations_unpaid_FYB",
+            "USSGL490100_delivered_orders_obligations_unpaid",
+            "USSGL490110_rein_deliv_ord_CPE",
+            "USSGL493100_delivered_orders_obligations_transferred_unpaid",
+            "USSGL498100_upward_adj_of_prior_year_deliv_orders_oblig_unpaid",
+            "USSGL480200_undelivered_orders_obligations_prepaid_advanced_FYB",
+            "USSGL480200_undelivered_orders_obligations_prepaid_advanced",
+            "USSGL483200_undeliv_orders_oblig_transferred_prepaid_advanced",
+            "USSGL488200_upward_adj_prior_year_undeliv_orders_oblig_prepaid",
+            "USSGL490200_delivered_orders_obligations_paid",
+            "USSGL490800_authority_outlayed_not_yet_disbursed_FYB",
+            "USSGL490800_authority_outlayed_not_yet_disbursed",
+            "USSGL498200_upward_adj_of_prior_year_deliv_orders_oblig_paid",
+            "obligations_undelivered_orders_unpaid_total_FYB",
+            "obligations_undelivered_orders_unpaid_total",
+            "obligations_delivered_orders_unpaid_total",
+            "obligations_delivered_orders_unpaid_total_FYB",
+            "gross_outlays_undelivered_orders_prepaid_total_FYB",
+            "gross_outlays_undelivered_orders_prepaid_total",
+            "gross_outlays_delivered_orders_paid_total_FYB",
+            "gross_outlays_delivered_orders_paid_total",
+            "gross_outlay_amount_FYB",
+            "gross_outlay_amount_FYB_to_period_end",
+            "obligations_incurred",
+            "USSGL487100_downward_adj_prior_year_unpaid_undeliv_orders_oblig",
+            "USSGL497100_downward_adj_prior_year_unpaid_deliv_orders_oblig",
+            "USSGL487200_downward_adj_prior_year_prepaid_undeliv_order_oblig",
+            "USSGL497200_downward_adj_of_prior_year_paid_deliv_orders_oblig",
+            "deobligations_or_recoveries_or_refunds_from_prior_year",
+            "drv_obligations_incurred_by_program_object_class",
+            "drv_obligations_undelivered_orders_unpaid",
+            "reporting_period_start",
+            "reporting_period_end",
+            "last_modified_date",
+            "certified_date",
+            "create_date",
+            "update_date",
+            "submission_id",
+            "treasury_account_id",
+            "agency_identifier_name",
+            "allocation_transfer_agency_identifier_name",
+        ]
+
+    @property
+    def object_class_program_activity_agg_cols(self) -> dict[str, Column]:
+        return {
+            "last_modified_date": lambda col: sf.max(col).alias(col),
+        }
+
+    @property
+    def object_class_program_activity_select_cols(self) -> list[Any]:
+        return [
+            col
+            for col in query_paths["object_class_program_activity"]["treasury_account"].keys()
+            if not col.startswith("last_modified_date")
+        ] + ["last_modified_date"]
+
+    @property
+    def object_class_program_activity(self) -> DataFrame:
+        return (
+            self._object_class_program_activity_df.filter(self.dynamic_filters)
+            .filter(
+                sf.col("submission_id").isin(
+                    get_submission_ids_for_periods(
+                        self.reporting_fiscal_year, self.reporting_fiscal_quarter, self.reporting_fiscal_period
+                    )
+                )
+            )
+            .groupBy(self.object_class_program_activity_groupby_cols)
+            .agg(*[agg_func(col) for col, agg_func in self.object_class_program_activity_agg_cols.items()])
+            .select(self.object_class_program_activity_select_cols)
+        )
